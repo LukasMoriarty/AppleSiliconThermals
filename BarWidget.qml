@@ -14,7 +14,20 @@ BarWidget {
   property int fanMax: 7199
   property int fanTarget: 0
   property bool fanControlEnabled: false
-  property bool manualMode: false
+  property string mode: "auto"
+  readonly property bool manualMode: mode === "manual"
+  property var temps: []
+  property var curveStatus: null
+  property string curveSensor: "Charge Regulator Temp"
+  property int curveLow: 50
+  property int curveHigh: 75
+  property bool curveDirty: false
+  property string binaryVersion: ""
+  property string expectedVersion: ""
+  property bool binaryAvailable: false
+  property string commandError: ""
+  property var pendingCommands: []
+  readonly property bool needsSetup: !binaryAvailable || !expectedVersion || binaryVersion !== expectedVersion || (hasFan && !fanControlEnabled)
   property real maxTemp: 0
   property real powerWatts: 0
   property string deviceModel: "Apple Silicon Mac"
@@ -24,7 +37,43 @@ BarWidget {
   property var sensors: ({})
 
   property bool popupOpen: false
-  readonly property string helperPath: Qt.resolvedUrl("helper.sh").toString().replace(/^file:\/\//, "")
+  readonly property string binPath: Qt.resolvedUrl("bin/apple-silicon-thermals").toString().replace(/^file:\/\//, "")
+
+  readonly property string setupPath: Qt.resolvedUrl("setup.sh").toString().replace(/^file:\/\//, "")
+
+  FileView {
+    path: Qt.resolvedUrl("release.env").toString().replace(/^file:\/\//, "")
+    watchChanges: true
+    onLoaded: {
+      var match = text().match(/^VERSION=(.+)$/m)
+      root.expectedVersion = match ? match[1].trim() : ""
+    }
+    onFileChanged: reload()
+  }
+
+  function enqueue(args) {
+    pendingCommands = pendingCommands.concat([args])
+    drainWrites()
+  }
+
+  function drainWrites() {
+    if (writeProc.running || pendingCommands.length === 0) return
+    var args = pendingCommands[0]
+    pendingCommands = pendingCommands.slice(1)
+    commandError = ""
+    writeProc.command = ["/bin/sh", "-c", 'exec "$@"', "ast", binPath].concat(args)
+    writeProc.running = true
+  }
+
+  function saveCurve(start) {
+    if (curveLow >= curveHigh) {
+      commandError = "Low temperature must be below high temperature."
+      return
+    }
+    enqueue(["curve", "config", curveSensor, String(curveLow), String(curveHigh)])
+    if (start) enqueue(["curve", "on"])
+    curveDirty = false
+  }
 
   function snapSpeed(val) {
     var min = root.fanMin || 1199
@@ -38,6 +87,8 @@ BarWidget {
     try {
       var data = JSON.parse(jsonStr)
       if (data) {
+        root.binaryAvailable = true
+        root.binaryVersion = data.version || ""
         if (data.is_apple_silicon !== undefined) root.isAppleSilicon = Boolean(data.is_apple_silicon)
         if (data.has_fan !== undefined) root.hasFan = Boolean(data.has_fan)
         if (data.fan_count !== undefined) root.fanCount = Number(data.fan_count)
@@ -49,7 +100,18 @@ BarWidget {
           root.fanMax = data.fan_max || 7199
           root.fanTarget = (data.fan_target !== undefined) ? data.fan_target : 0
           root.fanControlEnabled = Boolean(data.fan_control_enabled)
-          root.manualMode = Boolean(data.manual_mode)
+          root.mode = data.mode || "auto"
+          root.temps = (data.temps || []).map(function(t) { return t.label })
+          root.curveStatus = data.curve_status || null
+          if (!root.curveDirty && !writeProc.running && root.pendingCommands.length === 0) {
+            if (data.curve) {
+              root.curveSensor = data.curve.sensor
+              root.curveLow = data.curve.low
+              root.curveHigh = data.curve.high
+            } else if (root.temps.indexOf(root.curveSensor) < 0 && root.temps.length > 0) {
+              root.curveSensor = root.temps[0]
+            }
+          }
           root.maxTemp = (data.max_temp !== undefined) ? data.max_temp : 0
           root.powerWatts = (data.power_watts !== undefined) ? data.power_watts : 0
           root.sensors = data.sensors || {}
@@ -76,8 +138,7 @@ BarWidget {
   }
 
   function setSpeed(target) {
-    writeProc.targetSpeed = String(target)
-    writeProc.running = true
+    enqueue(["set", String(target)])
   }
 
   Component.onCompleted: root.refresh()
@@ -94,7 +155,8 @@ BarWidget {
   Process {
     id: readProc
     property string buffer: ""
-    command: [root.helperPath, "get"]
+    command: ["/bin/sh", "-c", 'exec "$1" get', "ast", root.binPath]
+    onStarted: buffer = ""
     stdout: SplitParser {
       onRead: function(line) {
         var str = String(line).trim()
@@ -106,6 +168,7 @@ BarWidget {
       }
     }
     onExited: function(code) {
+      if (code !== 0) root.binaryAvailable = false
       if (readProc.buffer.trim().length > 0) {
         root.applyData(readProc.buffer.trim())
         readProc.buffer = ""
@@ -115,10 +178,16 @@ BarWidget {
 
   Process {
     id: writeProc
-    property string targetSpeed: "auto"
-    command: [root.helperPath, "set", targetSpeed]
+    property string errorBuffer: ""
+    onStarted: errorBuffer = ""
+    stderr: StdioCollector { waitForEnd: true; onStreamFinished: writeProc.errorBuffer = text.trim() }
     onExited: function(code) {
+      if (code !== 0) {
+        root.commandError = errorBuffer || "Fan command failed."
+        root.pendingCommands = []
+      }
       root.refresh()
+      Qt.callLater(root.drainWrites)
     }
   }
 
@@ -139,14 +208,15 @@ BarWidget {
       if (!root.isAppleSilicon) return Qt.rgba(1, 1, 1, 0.35)
       if (root.maxTemp >= 80) return Color.urgent
       if (root.maxTemp >= 65) return "#ffaa00"
-      if (root.manualMode) return Color.accent
+      if (root.mode !== "auto") return Color.accent
       return root.bar ? root.bar.barForeground : Color.foreground
     }
 
     tooltipText: {
       if (!root.isAppleSilicon) return "Apple Silicon Thermals: Unsupported non-Apple hardware"
       if (!root.hasFan) return "Apple Silicon Thermals: " + root.maxTemp + "°C (Fanless)"
-      return "Apple Silicon Thermals: " + root.fanRpm + " RPM | " + root.maxTemp + "°C"
+      if (root.needsSetup) return "Apple Silicon Thermals: run setup.sh"
+      return "Apple Silicon Thermals (" + root.mode + "): " + root.fanRpm + " RPM | " + root.maxTemp + "°C"
     }
 
     onPressed: function(b) {
@@ -253,10 +323,16 @@ BarWidget {
       }
     }
 
-    Column {
-      id: mainCol
+    Flickable {
       anchors.fill: parent
       visible: root.isAppleSilicon
+      contentHeight: mainCol.implicitHeight
+      clip: true
+      boundsBehavior: Flickable.StopAtBounds
+
+    Column {
+      id: mainCol
+      width: parent.width
       spacing: Style.space(12)
 
       // Header row
@@ -302,6 +378,41 @@ BarWidget {
 
       PanelSeparator { width: parent.width }
 
+        // Setup notification if fan_control is not yet active
+        BorderSurface {
+          width: parent.width
+          visible: root.needsSetup
+          radius: Style.cornerRadius
+          color: Qt.rgba(1, 0.6, 0, 0.15)
+          borderSpec: Border.flat(Color.accent, 1)
+          height: setupNotice.implicitHeight + Style.space(16)
+
+          Column {
+            id: setupNotice
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.top: parent.top
+            anchors.margins: Style.space(8)
+            spacing: Style.space(2)
+
+            Text {
+              text: "Setup required"
+              color: "#ffbb33"
+              font.bold: true
+              font.family: root.bar ? root.bar.fontFamily : Style.font.family
+              font.pixelSize: Style.font.caption
+            }
+            Text {
+              text: "Run in your terminal: " + root.setupPath
+              color: root.bar ? root.bar.foreground : Color.foreground
+              font.family: root.bar ? root.bar.fontFamily : Style.font.family
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.Wrap
+              width: parent.width
+            }
+          }
+        }
+
       // Hero Status Card
       BorderSurface {
         width: parent.width
@@ -327,7 +438,7 @@ BarWidget {
             }
 
             Text {
-              text: root.hasFan ? (root.manualMode ? ("Manual (" + root.fanTarget + " RPM)") : "Automatic (SMC)") : "Passive Cooling (Silent)"
+              text: root.hasFan ? (root.mode === "curve" ? "Temperature curve" : (root.manualMode ? ("Manual (" + root.fanTarget + " RPM)") : "Automatic (SMC)")) : "Passive Cooling (Silent)"
               color: (root.hasFan && root.manualMode) ? Color.accent : Qt.rgba(1, 1, 1, 0.6)
               font.family: root.bar ? root.bar.fontFamily : Style.font.family
               font.pixelSize: Style.font.caption
@@ -383,71 +494,100 @@ BarWidget {
           }
         }
 
-        // Setup notification if fan_control is not yet active
-        BorderSurface {
+        Row {
           width: parent.width
-          visible: !root.fanControlEnabled
-          radius: Style.cornerRadius
-          color: Qt.rgba(1, 0.6, 0, 0.15)
-          borderSpec: Border.flat(Color.accent, 1)
-          height: Style.space(68)
-
-          Column {
-            anchors.fill: parent
-            anchors.margins: Style.space(8)
-            spacing: Style.space(2)
-
-            Text {
-              text: "⚠ Manual fan control not configured"
-              color: "#ffbb33"
-              font.bold: true
-              font.family: root.bar ? root.bar.fontFamily : Style.font.family
-              font.pixelSize: Style.font.caption
-            }
-            Text {
-              text: "Run the one-time system setup documented in the plugin README to enable."
-              color: root.bar ? root.bar.foreground : Color.foreground
-              font.family: root.bar ? root.bar.fontFamily : Style.font.family
-              font.pixelSize: Style.font.caption
-              wrapMode: Text.Wrap
-              width: parent.width
-            }
+          visible: !root.needsSetup
+          spacing: Style.space(6)
+          Button {
+            width: (parent.width - Style.space(12)) / 3
+            text: "Auto"
+            selected: root.mode === "auto"
+            onClicked: root.setSpeed("auto")
+          }
+          Button {
+            width: (parent.width - Style.space(12)) / 3
+            text: "Curve"
+            selected: root.mode === "curve"
+            onClicked: root.saveCurve(true)
+          }
+          Button {
+            width: (parent.width - Style.space(12)) / 3
+            text: "Manual"
+            selected: root.manualMode
+            onClicked: root.setSpeed(root.snapSpeed(root.fanRpm))
           }
         }
 
-        // Manual mode toggle row
-        Row {
+        Column {
           width: parent.width
-          visible: root.fanControlEnabled
+          visible: !root.needsSetup && root.mode === "curve"
           spacing: Style.space(8)
-
-          Text {
-            anchors.verticalCenter: parent.verticalCenter
-            text: "Manual Fan Speed Control"
-            color: root.bar ? root.bar.foreground : Color.foreground
-            font.family: root.bar ? root.bar.fontFamily : Style.font.family
-            font.pixelSize: Style.font.body
-            width: parent.width - toggleSwitch.width - Style.space(8)
+          Dropdown {
+            width: parent.width
+            label: "Track temperature"
+            options: root.temps
+            value: root.curveSensor
+            onChanged: function(value) { root.curveSensor = value; root.curveDirty = true }
           }
-
-          ToggleSwitch {
-            id: toggleSwitch
-            anchors.verticalCenter: parent.verticalCenter
-            checked: root.manualMode
-            onToggled: {
-              if (root.manualMode) {
-                root.setSpeed("auto")
-              } else {
-                root.setSpeed(root.fanRpm >= root.fanMin ? root.snapSpeed(root.fanRpm) : 1799)
-              }
+          Row {
+            width: parent.width
+            spacing: Style.space(12)
+            NumberField {
+              label: "Minimum fan at °C"
+              value: root.curveLow
+              from: 20; to: 100
+              fieldWidth: (parent.width - Style.space(12)) / 2
+              onModified: function(value) { root.curveLow = value; root.curveDirty = true }
+            }
+            NumberField {
+              label: "Maximum fan at °C"
+              value: root.curveHigh
+              from: 20; to: 100
+              fieldWidth: (parent.width - Style.space(12)) / 2
+              onModified: function(value) { root.curveHigh = value; root.curveDirty = true }
             }
           }
+          Button {
+            width: parent.width
+            text: "Apply curve"
+            enabled: root.curveDirty && root.curveLow < root.curveHigh
+            onClicked: root.saveCurve(false)
+          }
+          Text {
+            width: parent.width
+            wrapMode: Text.Wrap
+            color: Color.foreground
+            font.pixelSize: Style.font.caption
+            text: {
+              var status = root.curveStatus
+              if (!status) return "Waiting for curve status"
+              if (status.state === "released") return "Sensor unavailable: firmware control"
+              if (status.state === "firmware-override") return "Firmware override: retrying after 60 seconds"
+              return status.celsius + "°C → " + status.target + " RPM"
+            }
+          }
+          Text {
+            width: parent.width
+            wrapMode: Text.Wrap
+            color: Qt.rgba(1, 1, 1, 0.6)
+            font.pixelSize: Style.font.caption
+            text: "These sensors do not measure CPU temperature and can lag CPU load."
+          }
+        }
+
+        Text {
+          width: parent.width
+          visible: root.commandError !== ""
+          text: root.commandError
+          wrapMode: Text.Wrap
+          color: Color.urgent
+          font.pixelSize: Style.font.caption
         }
 
         // Slider for target RPM
         Column {
           width: parent.width
-          visible: root.fanControlEnabled && root.manualMode
+          visible: !root.needsSetup && root.manualMode
           spacing: Style.space(4)
 
           Item {
@@ -490,85 +630,24 @@ BarWidget {
           }
         }
 
-        // Preset Chips
         Row {
           width: parent.width
-          visible: root.fanControlEnabled
+          visible: !root.needsSetup && root.manualMode
           spacing: Style.space(6)
-
-          Button {
-            text: "Auto"
-            tooltipText: "Automatic Apple SMC hardware management"
-            width: (parent.width - Style.space(18)) / 4
-            selected: !root.manualMode
-            onClicked: root.setSpeed("auto")
-          }
-
           Button {
             text: "Quiet"
-            tooltipText: "Quiet cooling: 25% (1,799 RPM)"
-            width: (parent.width - Style.space(18)) / 4
-            selected: root.manualMode && Math.abs(root.fanTarget - 1799) < 250
-            onClicked: root.setSpeed(1799)
+            width: (parent.width - Style.space(12)) / 3
+            onClicked: root.setSpeed(root.snapSpeed(root.fanMax * 0.25))
           }
-
           Button {
             text: "Regular"
-            tooltipText: "Balanced cooling: 50% (3,599 RPM)"
-            width: (parent.width - Style.space(18)) / 4
-            selected: root.manualMode && Math.abs(root.fanTarget - 3599) < 250
-            onClicked: root.setSpeed(3599)
+            width: (parent.width - Style.space(12)) / 3
+            onClicked: root.setSpeed(root.snapSpeed(root.fanMax * 0.5))
           }
-
           Button {
             text: "Max"
-            tooltipText: "Maximum cooling: 100% (7,199 RPM)"
-            width: (parent.width - Style.space(18)) / 4
-            selected: root.manualMode && root.fanTarget >= 7000
-            onClicked: root.setSpeed(7199)
-          }
-        }
-
-        // Percentage subtext row for preset chips
-        Row {
-          width: parent.width
-          visible: root.fanControlEnabled
-          spacing: Style.space(6)
-
-          Text {
-            width: (parent.width - Style.space(18)) / 4
-            horizontalAlignment: Text.AlignHCenter
-            text: "SMC"
-            color: Qt.rgba(1, 1, 1, 0.45)
-            font.family: root.bar ? root.bar.fontFamily : Style.font.family
-            font.pixelSize: Style.font.caption
-          }
-
-          Text {
-            width: (parent.width - Style.space(18)) / 4
-            horizontalAlignment: Text.AlignHCenter
-            text: "25%"
-            color: Qt.rgba(1, 1, 1, 0.45)
-            font.family: root.bar ? root.bar.fontFamily : Style.font.family
-            font.pixelSize: Style.font.caption
-          }
-
-          Text {
-            width: (parent.width - Style.space(18)) / 4
-            horizontalAlignment: Text.AlignHCenter
-            text: "50%"
-            color: Qt.rgba(1, 1, 1, 0.45)
-            font.family: root.bar ? root.bar.fontFamily : Style.font.family
-            font.pixelSize: Style.font.caption
-          }
-
-          Text {
-            width: (parent.width - Style.space(18)) / 4
-            horizontalAlignment: Text.AlignHCenter
-            text: "100%"
-            color: Qt.rgba(1, 1, 1, 0.45)
-            font.family: root.bar ? root.bar.fontFamily : Style.font.family
-            font.pixelSize: Style.font.caption
+            width: (parent.width - Style.space(12)) / 3
+            onClicked: root.setSpeed(root.fanMax)
           }
         }
       }
@@ -669,5 +748,6 @@ BarWidget {
         }
       }
     }
-  }
+    }
+}
 }
