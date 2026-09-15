@@ -1,0 +1,13 @@
+[package]
+name = "apple-silicon-thermals"
+version = "1.1.0"
+edition = "2024"
+rust-version = "1.89"
+description = "Fan control and thermal telemetry helper for the AppleSiliconThermals Omarchy plugin"
+license = "MIT"
+publish = false
+
+[profile.release]
+lto = true
+strip = true
+codegen-units = 1
