@@ -7,7 +7,9 @@ import qs.Ui
 
 BarWidget {
   id: root
-  moduleName: "AppleSiliconThermals"
+  moduleName: "io.github.lukasmoriarty.applesiliconthermals"
+
+  readonly property bool spinIcon: setting("spinIcon", true) === true
 
   property int fanRpm: 0
   property int fanMin: 1199
@@ -37,6 +39,7 @@ BarWidget {
   property var sensors: ({})
 
   property bool popupOpen: false
+  readonly property bool opened: popupOpen
   readonly property string binPath: Qt.resolvedUrl("bin/apple-silicon-thermals").toString().replace(/^file:\/\//, "")
 
   readonly property string setupPath: Qt.resolvedUrl("setup.sh").toString().replace(/^file:\/\//, "")
@@ -126,6 +129,11 @@ BarWidget {
     if (!readProc.running) {
       readProc.running = true
     }
+  }
+
+  function open() {
+    popupOpen = true
+    refresh()
   }
 
   function togglePopup() {
@@ -229,7 +237,8 @@ BarWidget {
       to: 360
       duration: Math.max(400, Math.round(60000 / Math.max(root.fanRpm, 600)))
       loops: Animation.Infinite
-      running: root.isAppleSilicon && root.hasFan && root.fanRpm > 0
+      running: root.spinIcon && root.isAppleSilicon && root.hasFan && root.fanRpm > 0
+      onStopped: button.textRotation = 0
     }
   }
 

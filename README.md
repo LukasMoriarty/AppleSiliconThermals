@@ -6,6 +6,10 @@ configurable temperature curve. Inspired by [Stats](https://mac-stats.com/).
 
 ## Install
 
+**Preview:** the Rust implementation is currently tested from source. The release
+checksum is not pinned yet, so use [Development and validation](#development-and-validation)
+until a release is published. The commands below describe the pinned release path.
+
 ```bash
 git clone --branch feat/rust-temperature-curve https://github.com/cristim/AppleSiliconThermals.git \
   ~/.config/omarchy/plugins/io.github.lukasmoriarty.applesiliconthermals
@@ -50,6 +54,21 @@ The bar shows RPM, temperature, power, and the current mode. The popup shows cur
 status and command errors. Fanless Macs retain telemetry without fan controls.
 Hardware testing has been performed on a 13-inch M1 MacBook Pro; other models and
 multiple physical fans still need hardware testing.
+
+## Icon animation
+
+To keep the fan icon still, add `"spinIcon": false` to its existing entry in
+`~/.config/omarchy/shell.json` under `bar.layout`:
+
+```json
+{
+  "id": "io.github.lukasmoriarty.applesiliconthermals",
+  "spinIcon": false
+}
+```
+
+The setting persists across restarts. Omit it or set it to `true` to animate while
+the fan runs. RPM readings, temperature colors, and fan control work in either case.
 
 ## Service and command line
 
@@ -119,6 +138,13 @@ versions; GitHub Actions builds the static aarch64 musl artifact.
 Live checks on the M1 cover curve ramping, service-unit validation, crash recovery,
 and switching back to firmware. Suspend/resume, logout/login, and reboot validation
 require a separate session that can interrupt desktop work; they are not yet verified.
+
+## Packaging and releases
+
+See [PACKAGING.md](PACKAGING.md) for native and musl builds, release artifacts,
+versioning, checksum pinning, installation verification, downstream package layout,
+and rollback. This fork currently distributes binaries from its own release
+repository; upstream adoption needs the download URL and clone instructions updated.
 
 ## License
 
