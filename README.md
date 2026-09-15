@@ -1,122 +1,125 @@
 # 󰈐 AppleSiliconThermals
 
-**Hardware thermal monitoring and fan speed control plugin for [Omarchy Linux](https://omarchy.org/) on Apple Silicon (M1 / M2) MacBooks.**
+Thermal monitoring and fan control for Apple Silicon Linux and the Omarchy shell.
+This fork replaces the shell helper with a dependency-free Rust binary and adds a
+configurable temperature curve. Inspired by [Stats](https://mac-stats.com/).
 
-This plugin is inspired by the macOS menu bar utility **Stats** (https://mac-stats.com/).
-
-**AppleSiliconThermals** bridges the Asahi Linux `macsmc_hwmon` kernel driver with the modern Omarchy Quickshell status bar. It provides real-time sensor telemetry, a dynamic status bar indicator with rotational animation, and a popup control panel offering continuous fan curve control and quick presets.
-
----
-
-## Features
-
-- 󰈐 **Dynamic Status Bar Indicator**:
-  - Compact fan icon (`󰈐`) seamlessly styled with active Omarchy theme tokens.
-  - Dynamically spins smoothly when the fan is active; duration scales proportionally with current RPM.
-  - Thermal color alerts: neutral when cool, warm amber (≥65°C), and urgent red (≥80°C).
-  - Hover tooltip with live RPM and maximum temperature.
-
-- **Dual-Mode Fan Control (macOS Stats Style)**:
-  - **Automatic Mode**: Relaxes fan management back to Apple's calibrated hardware SMC algorithms.
-  - **Manual Mode**: Precision continuous slider from **1,199 RPM to 7,199 RPM** with 50 RPM quantization snapping to values ending in **49** and **99** for authentic macOS Stats parity.
-  - **Instant Preset Chips**:
-    - `Auto`: Restores automatic SMC hardware management (`0 RPM` idle / dynamic).
-    - `Quiet`: Fixes fan at whisper-quiet **25%** (`1,799 RPM`).
-    - `Regular`: Balanced cooling at **50%** (`3,599 RPM`).
-    - `Max`: High-performance cooling at **100%** (`7,199 RPM`) for compiling, gaming, or heavy workloads.
-
-- **Comprehensive Hardware Telemetry**:
-  - Live Fan Speed (Current RPM, Target RPM, Minimum & Maximum limits).
-  - Component temperatures: **NAND Flash**, **Battery Hotspot**, **Charge Voltage Regulator**, and **Wi-Fi / Bluetooth Module**.
-  - Real-time Total System Power dissipation in Watts (`W`).
-
-- ⚡ **Zero External Dependencies**:
-  - Communicates directly with the Linux kernel's standard `hwmon` sysfs interface (`macsmc_hwmon`).
-  - No background Python or Node daemons required; lightweight shell backend.
-
----
-
-## Installation
-
-### Option 1: Direct installation with Omarchy CLI
+## Install
 
 ```bash
-omarchy plugin add https://github.com/LukasMoriarty/AppleSiliconThermals.git --enable
-```
-
-### Option 2: Manual clone into plugins directory
-
-```bash
-git clone https://github.com/LukasMoriarty/AppleSiliconThermals.git ~/.config/omarchy/plugins/io.github.lukasmoriarty.applesiliconthermals
+git clone --branch feat/rust-temperature-curve https://github.com/cristim/AppleSiliconThermals.git \
+  ~/.config/omarchy/plugins/io.github.lukasmoriarty.applesiliconthermals
+~/.config/omarchy/plugins/io.github.lukasmoriarty.applesiliconthermals/setup.sh
+omarchy-shell shell rescanPlugins
 omarchy plugin enable io.github.lukasmoriarty.applesiliconthermals right
 ```
 
----
+Run setup as your normal user. It downloads the prebuilt aarch64 musl binary,
+checks the SHA256 pinned in `release.env`, installs it atomically, and restarts an
+active curve service. It then uses sudo to enable `macsmc_hwmon.fan_control` at
+runtime, persist it through tmpfiles, and install the fan-target permission rule.
+No reboot or Rust compiler is needed. The existing upstream rule grants every
+local user write access to fan targets (mode 0666).
 
-## One-Time Setup for Manual Fan Control
+The fork keeps the upstream plugin ID. Disable and back up an existing upstream
+installation before replacing it. Do not enable two copies that control the same
+fans. After a plugin update, rerun setup if the widget asks for it.
 
-By default, the Linux kernel's `macsmc_hwmon` driver operates in read-only safe mode where the hardware SMC handles 100% of cooling decisions. Live telemetry (temperatures, power, live RPM) functions out of the box with zero setup.
+Release metadata is pinned in a follow-up commit after the release is built.
+A checkout with a placeholder checksum refuses setup before any system changes;
+use the pinned branch commit or the development installation below. A tag's source
+archive may still contain the placeholder.
 
-To unlock manual fan speed regulation, install the root-owned broker helper and bounded sudoers policy using standard system installation commands:
+## Fan modes
+
+- **Auto** hands control to Apple's SMC firmware and disables the curve service.
+  Firmware may stop the fan or run it at maximum, including during a hardware fault.
+- **Curve** follows a labelled temperature sensor. Select the sensor and the
+  temperatures for minimum and maximum fan speed, then apply. Defaults: Charge
+  Regulator Temp, 50°C to 75°C. Values must be whole degrees from 20 to 100, with
+  low below high. Between thresholds the target rises linearly. Increases apply
+  immediately; decreases are limited to about 300 RPM every two seconds.
+- **Manual** offers a slider and Quiet, Regular, and Max presets. Targets are
+  clamped separately to each fan's hardware limits. Manual also disables the curve.
+
+**The exposed component sensors do not measure CPU/SoC die temperature and can lag
+CPU load.** The tested M1 exposes NAND, battery, charge regulator, and Wi-Fi/BT
+readings. A temperature curve does not repair a dead battery or other hardware fault.
+
+The bar shows RPM, temperature, power, and the current mode. The popup shows curve
+status and command errors. Fanless Macs retain telemetry without fan controls.
+Hardware testing has been performed on a 13-inch M1 MacBook Pro; other models and
+multiple physical fans still need hardware testing.
+
+## Service and command line
 
 ```bash
-cd ~/.config/omarchy/plugins/io.github.lukasmoriarty.applesiliconthermals
-sudo install -Dm755 system/apple-silicon-fan-control /usr/local/libexec/apple-silicon-fan-control
-sudo install -Dm440 system/apple-silicon-fan-control.sudoers /etc/sudoers.d/apple-silicon-fan-control
-sudo install -Dm644 system/macsmc-fan.conf /etc/tmpfiles.d/macsmc-fan.conf
-sudo systemd-tmpfiles --create /etc/tmpfiles.d/macsmc-fan.conf
+bin/apple-silicon-thermals get
+bin/apple-silicon-thermals curve config 'Charge Regulator Temp' 50 75
+bin/apple-silicon-thermals curve on
+bin/apple-silicon-thermals set 1799
+bin/apple-silicon-thermals set auto
+bin/apple-silicon-thermals curve off
 ```
 
-### Security Architecture
+`curve on` creates and enables `applesiliconthermals-curve.service` under your
+systemd user configuration. It starts with the graphical session and stops with
+that session. It runs independently of the widget, so a shell reload does not
+interrupt the curve. `curve run` is reserved for systemd.
 
-- **Root-Owned & Non-User-Writable**: The helper resides in `/usr/local/libexec/apple-silicon-fan-control` (`0755 root:root`). No code is ever executed as root from user-writable directories.
-- **Narrow Validated Interface**: The helper only accepts a single validated action matching `^(auto|[1-7][0-9]{3})$` with strict bounds checking (1,199 to 7,199 RPM). Environment variables (`PATH`, `IFS`, `LD_PRELOAD`) are sanitized.
-- **Strict Sudoers Matching**: The sudoers rule in `/etc/sudoers.d/apple-silicon-fan-control` uses an exact POSIX Extended Regular Expression with zero wildcards:
-  ```sudoers
-  ALL ALL=(root) NOPASSWD: /usr/local/libexec/apple-silicon-fan-control ^(auto|[1-7][0-9]{3})$
-  ```
-- **Root-Owned Sysfs Registers**: Hardware registers remain strictly root-owned (`root:root`) with non-world-writable permissions.
+The unit's binary-independent `ExecStopPost` releases fans on stop or crash. It
+rewrites the current target, clamped to the fan's range, before writing zero to
+force the driver's firmware-mode transition. It uses maximum only when the target
+cannot be read. Firmware itself can still command maximum speed after release.
+A failed hardware write exits the service so the release handler runs.
 
----
+An invalid configuration or missing/implausible sensor releases control to firmware
+until readings recover. Three consecutive firmware target overrides cause release
+and a 60-second retry delay. Removing the binary also makes the loop release and
+exit. Status older than six seconds is ignored. Runtime mode records are cleared
+at logout; an out-of-band manual setting cannot be inferred reliably from the SMC
+target alone, so Auto in the widget describes this helper's tracked state.
 
-## Uninstallation & Removal
+Configuration: `${XDG_CONFIG_HOME:-~/.config}/applesiliconthermals/curve.conf`.
+It is strictly parsed data, never executed. Runtime state and the command lock live
+under `$XDG_RUNTIME_DIR/applesiliconthermals`; that environment variable is required.
 
-To remove the plugin from your Omarchy bar:
+## Remove
+
+Stop the curve before removing plugin files. To also undo system setup, run the
+uninstaller while the plugin still exists:
 
 ```bash
+~/.config/omarchy/plugins/io.github.lukasmoriarty.applesiliconthermals/bin/apple-silicon-thermals set auto
+sudo ~/.config/omarchy/plugins/io.github.lukasmoriarty.applesiliconthermals/uninstall.sh
 omarchy plugin disable io.github.lukasmoriarty.applesiliconthermals
 omarchy plugin remove io.github.lukasmoriarty.applesiliconthermals
 ```
 
-To remove the root-owned helper and system configurations:
+## Development and validation
+
+Rust 1.89 or newer:
 
 ```bash
-sudo rm -f /usr/local/libexec/apple-silicon-fan-control \
-           /etc/sudoers.d/apple-silicon-fan-control \
-           /etc/tmpfiles.d/macsmc-fan.conf
+cargo build --release --locked
+install -Dm755 target/release/apple-silicon-thermals bin/apple-silicon-thermals
+cargo fmt --check
+cargo clippy --locked --all-targets -- -D warnings
+cargo test --locked
+python3 tests/cli.py
+bash -n setup.sh uninstall.sh
 ```
 
----
+Development installation still requires the kernel parameter and fan-target
+permissions from setup. Tests use synthetic hwmon trees and a stub systemctl;
+`AST_HWMON_ROOT`, `AST_SYS_ROOT`, and `AST_SYSTEMCTL` are test seams.
+CI checks Rust and scripts. Release tags must match Cargo, manifest, and release.env
+versions; GitHub Actions builds the static aarch64 musl artifact.
 
-## Hardware Compatibility & Community Testing
+Live checks on the M1 cover curve ramping, service-unit validation, crash recovery,
+and switching back to firmware. Suspend/resume, logout/login, and reboot validation
+require a separate session that can interrupt desktop work; they are not yet verified.
 
-This plugin is purpose-built for Apple Silicon hardware running Linux. It dynamically adapts its UI depending on the detected Mac model and available cooling architecture:
+## License
 
-| Hardware Category | Models | Supported Features | Status |
-| :--- | :--- | :--- | :--- |
-| **MacBook Pro** | 13" M1 (2020), 14"/16" M1/M2 Pro & Max | Live telemetry, spinning fan icon, continuous slider & presets | **Verified & Tested** |
-| **MacBook Air** | 13"/15" M1 / M2 | Live component thermals & power; adapts to fanless mode (`󰔏` icon) | **Supported** |
-| **Mac mini** | M1 / M2 / M2 Pro | Full fan control & thermal monitoring (Single fan) | **Community Testing** |
-| **Mac Studio** | M1/M2 Max & Ultra | Synchronous dual-fan control & telemetry | **Call for Testing** |
-| **Mac Pro** | M2 Ultra | Synchronous multi-fan control & telemetry | **Call for Testing** |
-| **iMac** | 24" M1 (2-port & 4-port) | Single / dual-fan control & telemetry | **Call for Testing** |
-| **Non-Apple / x86** | Standard PCs, VMs, Intel/AMD | Inactive warning icon (`󰌺`) & unsupported hardware notice | **Handled / Inactive** |
-
-> **Do you own a Mac Studio, Mac mini, Mac Pro, or iMac?**
-> Feedback is much appreciated! Please [open an issue](https://github.com/LukasMoriarty/AppleSiliconThermals/issues) with your hardware details and test results to help refine multi-fan curves and fan channel independence.
-
----
-
-## 📄 License
-
-This project is licensed under the [MIT License](LICENSE).
+[MIT](LICENSE). Original plugin by LukasMoriarty; Rust curve work in the cristim fork.
