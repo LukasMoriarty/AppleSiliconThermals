@@ -1,0 +1,54 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04-arm
+    env:
+      TARGET: aarch64-unknown-linux-musl
+      ASSET: apple-silicon-thermals-aarch64-linux-musl
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b4f984c1e7daae8e175614de3e73a8411a20333c # 1.89.0
+        with:
+          targets: aarch64-unknown-linux-musl
+      - name: Check tag, Cargo.toml and manifest.json versions match
+        run: |
+          tag_version="${GITHUB_REF_NAME#v}"
+          cargo_version="$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[0].version')"
+          manifest_version="$(jq -r .version manifest.json)"
+          release_version="$(sed -n 's/^VERSION=//p' release.env)"
+          if [[ "$tag_version" != "$cargo_version" || "$tag_version" != "$manifest_version" || "$tag_version" != "$release_version" ]]; then
+            echo "::error::versions differ: tag $tag_version, Cargo.toml $cargo_version, manifest.json $manifest_version"
+            exit 1
+          fi
+      - name: Install musl tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+      - run: cargo test --locked
+      - run: cargo build --release --locked --target "$TARGET"
+      - name: Package
+        run: |
+          cp "target/$TARGET/release/apple-silicon-thermals" "$ASSET"
+          sha256sum "$ASSET" > "$ASSET.sha256"
+          "./$ASSET" get
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "$ASSET" "$ASSET.sha256" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" "$ASSET" "$ASSET.sha256" --title "$GITHUB_REF_NAME" --generate-notes
+          fi
