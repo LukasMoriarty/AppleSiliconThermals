@@ -525,7 +525,9 @@ BarWidget {
           Dropdown {
             width: parent.width
             label: "Track temperature"
-            options: root.temps
+            options: root.temps.map(function(sensor) {
+              return { value: sensor, label: sensor.replace(/\s+Temp(?:erature)?$/i, "") }
+            })
             value: root.curveSensor
             onChanged: function(value) { root.curveSensor = value; root.curveDirty = true }
           }
@@ -533,14 +535,14 @@ BarWidget {
             width: parent.width
             spacing: Style.space(12)
             NumberField {
-              label: "Minimum fan at °C"
+              label: "Minimum below °C"
               value: root.curveLow
               from: 20; to: 100
               fieldWidth: (parent.width - Style.space(12)) / 2
               onModified: function(value) { root.curveLow = value; root.curveDirty = true }
             }
             NumberField {
-              label: "Maximum fan at °C"
+              label: "Maximum above °C"
               value: root.curveHigh
               from: 20; to: 100
               fieldWidth: (parent.width - Style.space(12)) / 2
