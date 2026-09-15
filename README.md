@@ -55,6 +55,14 @@ status and command errors. Fanless Macs retain telemetry without fan controls.
 Hardware testing has been performed on a 13-inch M1 MacBook Pro; other models and
 multiple physical fans still need hardware testing.
 
+## Screenshots
+
+Captured from the installed widget on a 13-inch M1 MacBook Pro.
+
+| Curve | Manual |
+| --- | --- |
+| ![Curve controls](docs/screenshots/curve.png) | ![Manual controls](docs/screenshots/manual.png) |
+
 ## Icon animation
 
 To keep the fan icon still, add `"spinIcon": false` to its existing entry in
