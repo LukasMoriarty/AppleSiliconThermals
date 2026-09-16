@@ -1,0 +1,2 @@
+# Omarchy Apple Silicon Thermals - strictly bounded fan control broker
+ALL ALL=(root) NOPASSWD: /usr/local/libexec/apple-silicon-fan-control ^(auto|[1-7][0-9]{3})$

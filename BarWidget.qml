@@ -398,14 +398,14 @@ BarWidget {
             spacing: Style.space(2)
 
             Text {
-              text: "⚠ Manual fan control disabled in kernel"
+              text: "⚠ Manual fan control not configured"
               color: "#ffbb33"
               font.bold: true
               font.family: root.bar ? root.bar.fontFamily : Style.font.family
               font.pixelSize: Style.font.caption
             }
             Text {
-              text: "Run in your terminal: sudo " + root.helperPath + " setup"
+              text: "Run the one-time system setup documented in the plugin README to enable."
               color: root.bar ? root.bar.foreground : Color.foreground
               font.family: root.bar ? root.bar.fontFamily : Style.font.family
               font.pixelSize: Style.font.caption

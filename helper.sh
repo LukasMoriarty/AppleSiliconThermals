@@ -86,7 +86,8 @@ cmd_get() {
   fi
 
   local fc_param="/sys/module/macsmc_hwmon/parameters/fan_control"
-  if [[ -f "$fc_param" ]]; then
+  local broker="/usr/local/libexec/apple-silicon-fan-control"
+  if [[ -x "$broker" && -f "$fc_param" ]]; then
     local fc_val
     fc_val=$(cat "$fc_param" 2>/dev/null || echo "N")
     if [[ "$fc_val" == "Y" || "$fc_val" == "1" ]]; then
@@ -146,94 +147,27 @@ cmd_get() {
 
 cmd_set() {
   local target="${1:-auto}"
-  if [[ -z "$HWMON_DIR" ]]; then
-    echo "Error: macsmc_hwmon target not available" >&2
+
+  if [[ ! "$target" =~ ^(auto|[1-7][0-9]{3})$ ]]; then
+    echo "Error: Invalid target '$target'. Specify RPM (1199-7199) or 'auto'." >&2
     return 1
   fi
 
-  local targets=()
-  for t in "$HWMON_DIR"/fan*_target; do
-    if [[ -f "$t" ]]; then
-      targets+=("$t")
-    fi
-  done
-
-  if [[ ${#targets[@]} -eq 0 ]]; then
-    echo "Error: No fan target sysfs files found on this machine (fanless or unsupported)" >&2
-    return 1
+  local broker="/usr/local/libexec/apple-silicon-fan-control"
+  if [[ -x "$broker" ]]; then
+    sudo -n "$broker" "$target"
+    return $?
   fi
 
-  if [[ "$target" == "auto" || "$target" == "0" ]]; then
-    for t in "${targets[@]}"; do
-      echo 0 > "$t"
-    done
-    echo "Fan control reset to automatic SMC mode"
-    return 0
-  fi
-
-  # Validate numeric range
-  if [[ "$target" =~ ^[0-9]+$ ]]; then
-    local min max
-    min=$(cat "$HWMON_DIR/fan1_min" 2>/dev/null || echo 1199)
-    max=$(cat "$HWMON_DIR/fan1_max" 2>/dev/null || echo 7199)
-    if (( target < min )); then target=$min; fi
-    if (( target > max )); then target=$max; fi
-    for t in "${targets[@]}"; do
-      echo "$target" > "$t"
-    done
-    echo "Fan speed set to $target RPM across ${#targets[@]} fan(s)"
-    return 0
-  fi
-
-  echo "Error: Invalid target '$target'. Specify RPM (1199-7199) or 'auto'." >&2
+  echo "Error: Root broker $broker is not installed. Run the one-time system setup from README." >&2
   return 1
-}
-
-cmd_setup() {
-  if [[ $EUID -ne 0 ]]; then
-    echo "Please run setup as root (sudo ./helper.sh setup)" >&2
-    exit 1
-  fi
-
-  if ! is_apple_silicon; then
-    echo "Error: Apple Silicon hardware (macsmc_hwmon) not detected." >&2
-    echo "This plugin is designed only for Apple Silicon Macs running Linux." >&2
-    exit 1
-  fi
-
-  echo "1. Enabling fan_control module parameter in runtime..."
-  if [[ -f /sys/module/macsmc_hwmon/parameters/fan_control ]]; then
-    echo 1 > /sys/module/macsmc_hwmon/parameters/fan_control
-  fi
-
-  echo "2. Persisting fan_control parameter across reboots in /etc/tmpfiles.d/macsmc-fan.conf..."
-  mkdir -p /etc/tmpfiles.d
-  cat <<'EOF' > /etc/tmpfiles.d/macsmc-fan.conf
-w /sys/module/macsmc_hwmon/parameters/fan_control - - - - 1
-EOF
-
-  echo "3. Configuring udev rule for fan permissions in /etc/udev/rules.d/99-macsmc-fan.rules..."
-  mkdir -p /etc/udev/rules.d
-  cat <<'EOF' > /etc/udev/rules.d/99-macsmc-fan.rules
-ACTION=="add|change", SUBSYSTEM=="hwmon", ATTRS{name}=="macsmc_hwmon", RUN+="/usr/bin/sh -c 'chmod 0666 /sys%p/fan*_target 2>/dev/null || true'"
-EOF
-
-  echo "4. Applying immediate permissions..."
-  local hw
-  hw="$(find_macsmc_hwmon || true)"
-  if [[ -n "$hw" ]]; then
-    chmod 0666 "$hw"/fan*_target 2>/dev/null || true
-  fi
-
-  echo "Setup complete! Manual fan control is now active and accessible to regular users."
 }
 
 case "${1:-get}" in
   get) cmd_get ;;
   set) cmd_set "${2:-auto}" ;;
-  setup) cmd_setup ;;
   *)
-    echo "Usage: $0 [get | set <rpm|auto> | setup]" >&2
+    echo "Usage: $0 [get | set <rpm|auto>]" >&2
     exit 1
     ;;
 esac

@@ -55,20 +55,27 @@ omarchy plugin enable io.github.lukasmoriarty.applesiliconthermals right
 
 ## One-Time Setup for Manual Fan Control
 
-By default, the Linux kernel's `macsmc_hwmon` driver operates in read-only safe mode where the hardware SMC handles 100% of cooling decisions.
+By default, the Linux kernel's `macsmc_hwmon` driver operates in read-only safe mode where the hardware SMC handles 100% of cooling decisions. Live telemetry (temperatures, power, live RPM) functions out of the box with zero setup.
 
-To unlock manual fan speed regulation without requiring `sudo` on every slider adjustment:
-
-> Before executing the script, feel free to read it, or ask your favorite agent on what it does, if you don't feel comfortable doing so
+To unlock manual fan speed regulation, install the root-owned broker helper and bounded sudoers policy using standard system installation commands:
 
 ```bash
-sudo ~/.config/omarchy/plugins/io.github.lukasmoriarty.applesiliconthermals/setup.sh
+cd ~/.config/omarchy/plugins/io.github.lukasmoriarty.applesiliconthermals
+sudo install -Dm755 system/apple-silicon-fan-control /usr/local/libexec/apple-silicon-fan-control
+sudo install -Dm440 system/apple-silicon-fan-control.sudoers /etc/sudoers.d/apple-silicon-fan-control
+sudo install -Dm644 system/macsmc-fan.conf /etc/tmpfiles.d/macsmc-fan.conf
+sudo systemd-tmpfiles --create /etc/tmpfiles.d/macsmc-fan.conf
 ```
 
-This automated script:
-1. Enables the runtime kernel parameter `macsmc_hwmon.fan_control=1`.
-2. Persists the setting across reboots in `/etc/tmpfiles.d/macsmc-fan.conf`.
-3. Installs a udev rule in `/etc/udev/rules.d/99-macsmc-fan.rules` granting your user permission to write to `fan1_target`.
+### Security Architecture
+
+- **Root-Owned & Non-User-Writable**: The helper resides in `/usr/local/libexec/apple-silicon-fan-control` (`0755 root:root`). No code is ever executed as root from user-writable directories.
+- **Narrow Validated Interface**: The helper only accepts a single validated action matching `^(auto|[1-7][0-9]{3})$` with strict bounds checking (1,199 to 7,199 RPM). Environment variables (`PATH`, `IFS`, `LD_PRELOAD`) are sanitized.
+- **Strict Sudoers Matching**: The sudoers rule in `/etc/sudoers.d/apple-silicon-fan-control` uses an exact POSIX Extended Regular Expression with zero wildcards:
+  ```sudoers
+  ALL ALL=(root) NOPASSWD: /usr/local/libexec/apple-silicon-fan-control ^(auto|[1-7][0-9]{3})$
+  ```
+- **Root-Owned Sysfs Registers**: Hardware registers remain strictly root-owned (`root:root`) with non-world-writable permissions.
 
 ---
 
@@ -81,12 +88,13 @@ omarchy plugin disable io.github.lukasmoriarty.applesiliconthermals
 omarchy plugin remove io.github.lukasmoriarty.applesiliconthermals
 ```
 
-*(Optional)* If you ran the one-time `setup.sh` and wish to revert the kernel parameter and udev rules back to system defaults:
+To remove the root-owned helper and system configurations:
 
 ```bash
-sudo ~/.config/omarchy/plugins/io.github.lukasmoriarty.applesiliconthermals/uninstall.sh
+sudo rm -f /usr/local/libexec/apple-silicon-fan-control \
+           /etc/sudoers.d/apple-silicon-fan-control \
+           /etc/tmpfiles.d/macsmc-fan.conf
 ```
-*(Or manually remove `/etc/udev/rules.d/99-macsmc-fan.rules` and `/etc/tmpfiles.d/macsmc-fan.conf`).*
 
 ---
 

@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Secure environment sanitization
+export PATH="/usr/bin:/bin"
+unset IFS LD_PRELOAD LD_LIBRARY_PATH
+
+# Enforce root execution
+if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
+  echo "Error: apple-silicon-fan-control must run as root." >&2
+  exit 1
+fi
+
+# Strictly enforce exactly one argument
+if [[ $# -ne 1 ]]; then
+  echo "Usage: apple-silicon-fan-control <auto | 1199..7199>" >&2
+  exit 64
+fi
+
+ACTION="$1"
+
+# Validate argument: must be 'auto' or 4-digit number (1199-7199)
+if [[ ! "$ACTION" =~ ^(auto|[1-7][0-9]{3})$ ]]; then
+  echo "Error: Invalid argument '$ACTION'. Must be 'auto' or RPM between 1199 and 7199." >&2
+  exit 2
+fi
+
+# If numeric, strictly check range
+TARGET=0
+if [[ "$ACTION" != "auto" ]]; then
+  TARGET=$((10#$ACTION))
+  if (( TARGET < 1199 || TARGET > 7199 )); then
+    echo "Error: RPM target $TARGET out of bounds (1199..7199)." >&2
+    exit 2
+  fi
+fi
+
+# Discover macsmc_hwmon
+HWMON_DIR=""
+for d in /sys/class/hwmon/hwmon*; do
+  if [[ -f "$d/name" ]] && [[ "$(< "$d/name")" == "macsmc_hwmon" ]]; then
+    HWMON_DIR="$d"
+    break
+  fi
+done
+
+if [[ -z "$HWMON_DIR" ]]; then
+  echo "Error: macsmc_hwmon not found in sysfs." >&2
+  exit 1
+fi
+
+# Ensure target path canonicalizes safely inside /sys
+REAL_HWMON=$(realpath "$HWMON_DIR" 2>/dev/null || true)
+if [[ -z "$REAL_HWMON" || ! "$REAL_HWMON" =~ ^/sys/ ]]; then
+  echo "Security error: macsmc_hwmon path does not resolve inside /sys: $REAL_HWMON" >&2
+  exit 1
+fi
+
+# Ensure kernel fan control parameter is enabled
+FC_PARAM="/sys/module/macsmc_hwmon/parameters/fan_control"
+if [[ -f "$FC_PARAM" ]]; then
+  FC_VAL=$(cat "$FC_PARAM" 2>/dev/null || echo "N")
+  if [[ "$FC_VAL" != "Y" && "$FC_VAL" != "1" ]]; then
+    echo 1 > "$FC_PARAM" 2>/dev/null || true
+  fi
+fi
+
+# Find all fan targets
+shopt -s nullglob
+TARGETS=("$REAL_HWMON"/fan*_target)
+shopt -u nullglob
+
+if [[ ${#TARGETS[@]} -eq 0 ]]; then
+  echo "Error: No fan_target registers found in $REAL_HWMON." >&2
+  exit 1
+fi
+
+# Write target RPM (0 for auto, or integer RPM)
+for reg in "${TARGETS[@]}"; do
+  REAL_REG=$(realpath "$reg" 2>/dev/null || true)
+  if [[ -z "$REAL_REG" || ! "$REAL_REG" =~ ^/sys/ ]]; then
+    echo "Security error: Fan target does not resolve inside /sys: $REAL_REG" >&2
+    exit 1
+  fi
+  # Verify root ownership
+  REG_UID=$(stat -c "%u" "$REAL_REG" 2>/dev/null || echo 1)
+  if [[ "$REG_UID" -ne 0 ]]; then
+    echo "Security error: Register $REAL_REG is not owned by root (UID $REG_UID)" >&2
+    exit 1
+  fi
+  # Strip world-writable bit if present (remedy legacy chmod 0666)
+  chmod o-w "$REAL_REG" 2>/dev/null || true
+
+  echo "$TARGET" > "$REAL_REG"
+done
+
+if (( TARGET == 0 )); then
+  echo "Fan control set to auto (SMC management)"
+else
+  echo "Fan speed set to $TARGET RPM across ${#TARGETS[@]} fan(s)"
+fi
+exit 0
