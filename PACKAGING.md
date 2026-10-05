@@ -103,15 +103,12 @@ source commit or verify a pinned release checksum. Do not bundle `target/`, `.gi
 user configuration, runtime locks, or a generated user unit. The `.github/` and
 `tests/` directories are build/review inputs, not runtime requirements.
 
-System configuration, when managed by the package, should use package-owned
-files rather than run the interactive installer. The current setup installs:
-
-- `/etc/tmpfiles.d/macsmc-fan.conf` to enable the module parameter at boot.
-- `/etc/udev/rules.d/99-macsmc-fan.rules` to grant fan-target access.
-
-The inherited rule permits all local users (0666); downstreams should decide
-access policy explicitly. This repository does not yet include a PKGBUILD or the
-deferred first-party Omarchy mx-mac integration.
+System configuration, when managed by the package, should install the files in
+`system/` as package-owned files (broker to `/usr/local/libexec/` or the distribution's
+libexec directory, the sudoers rule, and the tmpfiles entry that enables the module
+parameter at boot). If the broker path changes, update `src/broker.rs` and the sudoers
+rule together. This repository does not yet include a PKGBUILD or the deferred
+first-party Omarchy mx-mac integration.
 
 ## Updates and rollback
 
@@ -121,5 +118,4 @@ curve unit. It does not enable Curve on a new install.
 
 For rollback, first run `bin/apple-silicon-thermals set auto`, then restore the
 previous plugin checkout and its matching binary/checksum. Re-enable Curve only
-when the restored version has been checked. If uninstalling system setup, run the
-uninstaller before deleting plugin files; see the README removal order.
+when the restored version has been checked. If removing system setup, follow the README removal order.

@@ -91,6 +91,23 @@ for reg in "${TARGETS[@]}"; do
   # Strip world-writable bit if present (remedy legacy chmod 0666)
   chmod o-w "$REAL_REG" 2>/dev/null || true
 
+  if (( TARGET == 0 )); then
+    # Rewriting a valid target first makes the driver rewrite the SMC mode key even when its
+    # cached manual flag is stale (after resume), so the 0 takes effect. Reusing the current
+    # target, clamped to the fan's range, avoids spinning the fan up on the way out.
+    STEM="${REAL_REG%_target}"
+    MIN=$(< "${STEM}_min")
+    MAX=$(< "${STEM}_max")
+    if [[ ! "$MIN" =~ ^[0-9]+$ || ! "$MAX" =~ ^[0-9]+$ ]]; then
+      echo "Error: ${STEM}_min/_max are not numeric." >&2
+      exit 1
+    fi
+    VALUE=$(cat "$REAL_REG" 2>/dev/null || echo "$MAX")
+    [[ "$VALUE" =~ ^[0-9]+$ ]] || VALUE="$MAX"
+    (( VALUE >= MIN )) || VALUE="$MIN"
+    (( VALUE <= MAX )) || VALUE="$MAX"
+    echo "$VALUE" > "$REAL_REG"
+  fi
   echo "$TARGET" > "$REAL_REG"
 done
 

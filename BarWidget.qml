@@ -29,7 +29,8 @@ BarWidget {
   property bool binaryAvailable: false
   property string commandError: ""
   property var pendingCommands: []
-  readonly property bool needsSetup: !binaryAvailable || !expectedVersion || binaryVersion !== expectedVersion || (hasFan && !fanControlEnabled)
+  readonly property bool binaryReady: binaryAvailable && expectedVersion && binaryVersion === expectedVersion
+  readonly property bool needsSetup: !binaryReady || (hasFan && !fanControlEnabled)
   property real maxTemp: 0
   property real powerWatts: 0
   property string deviceModel: "Apple Silicon Mac"
@@ -223,7 +224,7 @@ BarWidget {
     tooltipText: {
       if (!root.isAppleSilicon) return "Apple Silicon Thermals: Unsupported non-Apple hardware"
       if (!root.hasFan) return "Apple Silicon Thermals: " + root.maxTemp + "°C (Fanless)"
-      if (root.needsSetup) return "Apple Silicon Thermals: run setup.sh"
+      if (root.needsSetup) return root.binaryReady ? "Apple Silicon Thermals: install the fan broker (see README)" : "Apple Silicon Thermals: run setup.sh"
       return "Apple Silicon Thermals (" + root.mode + "): " + root.fanRpm + " RPM | " + root.maxTemp + "°C"
     }
 
@@ -412,7 +413,7 @@ BarWidget {
               font.pixelSize: Style.font.caption
             }
             Text {
-              text: "Run in your terminal: " + root.setupPath
+              text: root.binaryReady ? "Manual fan control needs the root-owned fan broker. Run the one-time system setup commands from the README." : "Run in your terminal: " + root.setupPath
               color: root.bar ? root.bar.foreground : Color.foreground
               font.family: root.bar ? root.bar.fontFamily : Style.font.family
               font.pixelSize: Style.font.caption

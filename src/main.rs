@@ -1,3 +1,4 @@
+mod broker;
 mod curve;
 mod hwmon;
 mod json;
@@ -69,6 +70,13 @@ fn controllable_fans(paths: &Paths) -> Result<(PathBuf, Vec<Fan>)> {
     let (dir, fans) = macsmc_fans(paths)?;
     if fans.is_empty() {
         return Err("no controllable fans (fanless or unsupported Mac)".into());
+    }
+    // The root broker sets every fan to one RPM, so fans must share a range.
+    if fans
+        .iter()
+        .any(|fan| (fan.min, fan.max) != (fans[0].min, fans[0].max))
+    {
+        return Err("fans with different RPM limits are not supported".into());
     }
     Ok((dir, fans))
 }
@@ -209,19 +217,7 @@ fn set(paths: &Paths, target: &str) -> Result {
     let _lock = state::lock().map_err(text)?;
     stop_curve()?;
     let (_, fans) = controllable_fans(paths)?;
-    let mut errors = Vec::new();
-    for fan in &fans {
-        let result = match rpm {
-            None => fan.release(),
-            Some(rpm) => fan.write_target(fan.clamp(rpm)),
-        };
-        if let Err(err) = result {
-            errors.push(format!("fan{}: {err}", fan.index));
-        }
-    }
-    if !errors.is_empty() {
-        return Err(errors.join("; "));
-    }
+    broker::run(&rpm.map_or_else(|| "auto".to_string(), |rpm| fans[0].clamp(rpm).to_string()))?;
     state::set_manual(rpm.is_some()).map_err(text)?;
     match rpm {
         None => println!("Fan control reset to automatic SMC mode"),
@@ -273,7 +269,9 @@ fn default_config(dir: &Path) -> Result<Config> {
 fn curve_on(paths: &Paths) -> Result {
     let _lock = state::lock().map_err(text)?;
     if !paths.fan_control_enabled() {
-        return Err("fan control is disabled in the kernel; run setup.sh first".into());
+        return Err(
+            "fan control is disabled in the kernel; install the fan broker (see the README)".into(),
+        );
     }
     let (dir, _) = controllable_fans(paths)?;
     let config_path = state::config_path().map_err(text)?;
@@ -321,6 +319,36 @@ fn sensor_millidegrees(dir: &Path, label: &str) -> Option<i64> {
         .map(|reading| reading.value)
 }
 
+/// Turn one controller tick into broker actions plus the target now applied. The controller
+/// writes 0 for firmware control; the broker's `auto` already rewrites the current target before
+/// writing 0, so a target immediately before a 0 is dropped. A lone repeat of the applied target
+/// is skipped to avoid a sudo call every tick, unless the read-back failed.
+fn plan_writes(
+    writes: &[u32],
+    applied: Option<u32>,
+    readback_ok: bool,
+) -> (Vec<String>, Option<u32>) {
+    if readback_ok && matches!(writes, [rpm] if Some(*rpm) == applied) {
+        return (Vec::new(), applied);
+    }
+    let actions = writes
+        .iter()
+        .enumerate()
+        .filter(|&(index, &rpm)| rpm == 0 || writes.get(index + 1) != Some(&0))
+        .map(|(_, &rpm)| {
+            if rpm == 0 {
+                "auto".to_string()
+            } else {
+                rpm.to_string()
+            }
+        })
+        .collect();
+    let applied = writes
+        .last()
+        .map_or(applied, |&last| (last != 0).then_some(last));
+    (actions, applied)
+}
+
 fn curve_run(paths: &Paths) -> Result {
     // Only systemd guarantees the unit's ExecStopPost release; a manual run killed with Ctrl-C
     // would leave the fans on their last target. SYSTEMD_EXEC_PID names the exact process systemd
@@ -336,15 +364,14 @@ fn curve_run(paths: &Paths) -> Result {
     let binary = std::env::current_exe().map_err(text)?;
     let (dir, fans) = controllable_fans(paths)?;
     let config_path = state::config_path().map_err(text)?;
-    let limits: Vec<(u32, u32)> = fans.iter().map(|fan| (fan.min, fan.max)).collect();
-    let mut controller = Controller::new(&limits);
+    // The broker sets all fans together and they share one range, so one controller drives them.
+    let mut controller = Controller::new(&[(fans[0].min, fans[0].max)]);
+    let mut last_sent: Option<u32> = None;
 
     loop {
         if !binary.exists() {
-            for fan in &fans {
-                if let Err(err) = fan.release() {
-                    eprintln!("fan{}: release: {err}", fan.index);
-                }
+            if let Err(err) = broker::run("auto") {
+                eprintln!("release: {err}");
             }
             return Ok(());
         }
@@ -360,22 +387,71 @@ fn curve_run(paths: &Paths) -> Result {
             .as_ref()
             .zip(reading)
             .map(|(config, value)| (value, config));
-        let readbacks: Vec<Option<u32>> = fans.iter().map(|fan| fan.target().ok()).collect();
-        let speeds: Vec<Option<u32>> = fans.iter().map(|fan| fan.input().ok()).collect();
+        let targets: Option<Vec<u32>> = fans.iter().map(|fan| fan.target().ok()).collect();
+        // A fan whose target differs from the last write counts as a firmware rewrite.
+        let readback = targets.and_then(|targets| {
+            let rewritten = targets.iter().copied().find(|&rpm| Some(rpm) != last_sent);
+            rewritten.or_else(|| targets.first().copied())
+        });
+        let speed = fans.iter().filter_map(|fan| fan.input().ok()).max();
 
-        let tick = controller.tick(input, &readbacks, &speeds);
-        for (fan, writes) in fans.iter().zip(&tick.writes) {
-            for &rpm in writes {
-                if let Err(err) = fan.write_target(rpm) {
-                    // A failed write invalidates the controller's assumed target. Exiting makes
-                    // systemd release every fan before restarting the controller.
-                    return Err(format!("fan{}: writing {rpm}: {err}", fan.index));
-                }
-            }
+        let tick = controller.tick(input, &[readback], &[speed]);
+        let (actions, sent) = plan_writes(&tick.writes[0], last_sent, readback.is_some());
+        for action in actions {
+            // A failed write invalidates the controller's assumed target. Exiting makes
+            // systemd release every fan before restarting the controller.
+            broker::run(&action).map_err(|err| format!("writing {action}: {err}"))?;
         }
+        last_sent = sent;
         if let Err(err) = state::write_status(tick.state.as_str(), reading, controller.target(0)) {
             eprintln!("status: {err}");
         }
         sleep(TICK);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::plan_writes;
+
+    fn plan(writes: &[u32], applied: Option<u32>) -> (Vec<String>, Option<u32>) {
+        plan_writes(writes, applied, true)
+    }
+
+    #[test]
+    fn repeated_target_is_sent_once() {
+        assert_eq!(plan(&[3000], None), (vec!["3000".to_string()], Some(3000)));
+        assert_eq!(plan(&[3000], Some(3000)), (Vec::new(), Some(3000)));
+        assert_eq!(
+            plan(&[3500], Some(3000)),
+            (vec!["3500".to_string()], Some(3500))
+        );
+    }
+
+    #[test]
+    fn missing_readback_rewrites_the_target() {
+        assert_eq!(
+            plan_writes(&[3000], Some(3000), false),
+            (vec!["3000".to_string()], Some(3000))
+        );
+    }
+
+    #[test]
+    fn override_reassert_sends_auto_then_target() {
+        assert_eq!(
+            plan(&[0, 3000], Some(3000)),
+            (vec!["auto".to_string(), "3000".to_string()], Some(3000))
+        );
+    }
+
+    #[test]
+    fn release_sends_auto_and_the_next_target_is_sent_again() {
+        let (actions, applied) = plan(&[2000, 0], Some(3000));
+        assert_eq!((actions, applied), (vec!["auto".to_string()], None));
+        assert_eq!(
+            plan(&[3000], applied),
+            (vec!["3000".to_string()], Some(3000))
+        );
+        assert_eq!(plan(&[], applied), (Vec::new(), None));
     }
 }

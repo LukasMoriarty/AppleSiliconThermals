@@ -24,6 +24,6 @@ jobs:
       - run: python3 tests/cli.py
       - name: Check shell script syntax
         run: |
-          for script in setup.sh uninstall.sh; do
+          for script in setup.sh system/apple-silicon-fan-control; do
             bash -n "$script"
           done

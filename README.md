@@ -20,10 +20,9 @@ omarchy plugin enable io.github.lukasmoriarty.applesiliconthermals right
 
 Run setup as your normal user. It downloads the prebuilt aarch64 musl binary,
 checks the SHA256 pinned in `release.env`, installs it atomically, and restarts an
-active curve service. It then uses sudo to enable `macsmc_hwmon.fan_control` at
-runtime, persist it through tmpfiles, and install the fan-target permission rule.
-No reboot or Rust compiler is needed. The existing upstream rule grants every
-local user write access to fan targets (mode 0666).
+active curve service. It never uses sudo. No reboot or Rust compiler is needed.
+Manual fan control also needs the root-owned broker described in
+[One-time setup](#one-time-setup-for-manual-fan-control).
 
 The fork keeps the upstream plugin ID. Disable and back up an existing upstream
 installation before replacing it. Do not enable two copies that control the same
@@ -33,6 +32,34 @@ Release metadata is pinned in a follow-up commit after the release is built.
 A checkout with a placeholder checksum refuses setup before any system changes;
 use the pinned branch commit or the development installation below. A tag's source
 archive may still contain the placeholder.
+
+## One-time setup for manual fan control
+
+Telemetry works without setup. Fan writes go through a root-owned broker that
+accepts only `auto` or an RPM between 1199 and 7199, so nothing in your
+user-writable checkout ever runs as root:
+
+```bash
+cd ~/.config/omarchy/plugins/io.github.lukasmoriarty.applesiliconthermals
+sudo install -Dm755 system/apple-silicon-fan-control /usr/local/libexec/apple-silicon-fan-control
+sudo install -Dm440 system/apple-silicon-fan-control.sudoers /etc/sudoers.d/apple-silicon-fan-control
+sudo install -Dm644 system/macsmc-fan.conf /etc/tmpfiles.d/macsmc-fan.conf
+sudo systemd-tmpfiles --create /etc/tmpfiles.d/macsmc-fan.conf
+```
+
+If you used an earlier version of this plugin's `setup.sh`, also remove its udev rule, which
+made fan targets writable by every local user:
+
+```bash
+sudo rm -f /etc/udev/rules.d/99-macsmc-fan.rules
+sudo udevadm control --reload-rules
+```
+
+The sudoers rule allows exactly `^(auto|[1-7][0-9]{3})$` for that path. `auto`
+rewrites each fan's current target (clamped to its range) before writing zero, so
+the driver leaves manual mode even after resume. Fan target registers stay
+root-owned and not world-writable. Reads of temperature, RPM and power need no
+privileges.
 
 ## Fan modes
 
@@ -44,7 +71,7 @@ archive may still contain the placeholder.
   low below high. Between thresholds the target rises linearly. Increases apply
   immediately; decreases are limited to about 300 RPM every two seconds.
 - **Manual** offers a slider and Quiet, Regular, and Max presets. Targets are
-  clamped separately to each fan's hardware limits. Manual also disables the curve.
+  clamped to the fans' hardware limits. Manual also disables the curve.
 
 **The exposed component sensors do not measure CPU/SoC die temperature and can lag
 CPU load.** The tested M1 exposes NAND, battery, charge regulator, and Wi-Fi/BT
@@ -53,7 +80,8 @@ readings. A temperature curve does not repair a dead battery or other hardware f
 The bar shows RPM, temperature, power, and the current mode. The popup shows curve
 status and command errors. Fanless Macs retain telemetry without fan controls.
 Hardware testing has been performed on a 13-inch M1 MacBook Pro; other models and
-multiple physical fans still need hardware testing.
+multiple physical fans still need hardware testing. Fans must share one RPM range;
+the daemon refuses to run when they differ.
 
 ## Screenshots
 
@@ -94,10 +122,10 @@ systemd user configuration. It starts with the graphical session and stops with
 that session. It runs independently of the widget, so a shell reload does not
 interrupt the curve. `curve run` is reserved for systemd.
 
-The unit's binary-independent `ExecStopPost` releases fans on stop or crash. It
-rewrites the current target, clamped to the fan's range, before writing zero to
-force the driver's firmware-mode transition. It uses maximum only when the target
-cannot be read. Firmware itself can still command maximum speed after release.
+The unit's binary-independent `ExecStopPost` releases fans on stop or crash through
+the broker's `auto`, which rewrites the current target, clamped to the fan's range,
+before writing zero to force the driver's firmware-mode transition. It uses maximum
+only when the target cannot be read. Firmware itself can still command maximum speed after release.
 A failed hardware write exits the service so the release handler runs.
 
 An invalid configuration or missing/implausible sensor releases control to firmware
@@ -113,14 +141,19 @@ under `$XDG_RUNTIME_DIR/applesiliconthermals`; that environment variable is requ
 
 ## Remove
 
-Stop the curve before removing plugin files. To also undo system setup, run the
-uninstaller while the plugin still exists:
+Return the fans to firmware, stop the curve, then remove the plugin and the system files:
 
 ```bash
 ~/.config/omarchy/plugins/io.github.lukasmoriarty.applesiliconthermals/bin/apple-silicon-thermals set auto
-sudo ~/.config/omarchy/plugins/io.github.lukasmoriarty.applesiliconthermals/uninstall.sh
 omarchy plugin disable io.github.lukasmoriarty.applesiliconthermals
 omarchy plugin remove io.github.lukasmoriarty.applesiliconthermals
+sudo rm -f /usr/local/libexec/apple-silicon-fan-control \
+           /etc/sudoers.d/apple-silicon-fan-control \
+           /etc/tmpfiles.d/macsmc-fan.conf
+sudo rm -f /etc/udev/rules.d/99-macsmc-fan.rules
+sudo udevadm control --reload-rules
+rm -f ~/.config/systemd/user/applesiliconthermals-curve.service
+systemctl --user daemon-reload
 ```
 
 ## Development and validation
@@ -134,12 +167,12 @@ cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
 python3 tests/cli.py
-bash -n setup.sh uninstall.sh
+bash -n setup.sh system/apple-silicon-fan-control
 ```
 
-Development installation still requires the kernel parameter and fan-target
-permissions from setup. Tests use synthetic hwmon trees and a stub systemctl;
-`AST_HWMON_ROOT`, `AST_SYS_ROOT`, and `AST_SYSTEMCTL` are test seams.
+Development installation still requires the broker setup above. Tests use synthetic
+hwmon trees plus stub systemctl and broker programs; `AST_HWMON_ROOT`, `AST_SYS_ROOT`,
+`AST_SYSTEMCTL`, and `AST_BROKER` are test seams.
 CI checks Rust and scripts. Release tags must match Cargo, manifest, and release.env
 versions; GitHub Actions builds the static aarch64 musl artifact.
 

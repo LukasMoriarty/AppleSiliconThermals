@@ -25,6 +25,7 @@ impl Paths {
                 .join("sys/module/macsmc_hwmon/parameters/fan_control"),
         )
         .is_ok_and(|value| value == "Y" || value == "1")
+            && crate::broker::installed()
     }
 
     pub fn device_tree(&self, node: &str) -> PathBuf {
@@ -102,22 +103,6 @@ impl Fan {
 
     pub fn target(&self) -> io::Result<u32> {
         read_rpm(&self.attr("target"))
-    }
-
-    pub fn write_target(&self, rpm: u32) -> io::Result<()> {
-        fs::write(self.attr("target"), rpm.to_string())
-    }
-
-    /// Hand the fan back to the SMC. Writing a valid target first makes the driver rewrite the SMC
-    /// mode key even when its cached manual flag is stale (after resume or a warm reboot), so the 0
-    /// takes effect. Reusing the current target avoids spinning the fan up on the way out.
-    pub fn release(&self) -> io::Result<()> {
-        self.write_target(self.release_rpm())?;
-        self.write_target(0)
-    }
-
-    fn release_rpm(&self) -> u32 {
-        self.target().map_or(self.max, |target| self.clamp(target))
     }
 
     pub fn clamp(&self, rpm: u32) -> u32 {
@@ -219,25 +204,7 @@ pub mod tests {
         let labels: Vec<&str> = temps.iter().map(|r| r.label.as_str()).collect();
         assert_eq!(labels, ["NAND Flash Temperature", "Charge Regulator Temp"]);
 
-        fans[0].release().unwrap();
-        assert_eq!(fans[0].target().unwrap(), 0);
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn release_rewrites_the_current_target_before_handing_back() {
-        let root = fake_tree("release");
-        let dir = root.join("hwmon3");
-        let fans = fans(&dir).unwrap();
-        for (current, expected) in [
-            ("3000\n", 3000),
-            ("0\n", 1199),
-            ("9000\n", 7199),
-            ("junk\n", 7199),
-        ] {
-            fs::write(dir.join("fan1_target"), current).unwrap();
-            assert_eq!(fans[0].release_rpm(), expected, "target {current:?}");
-        }
+        assert_eq!(fans[0].target().unwrap(), 7199);
         fs::remove_dir_all(root).unwrap();
     }
 

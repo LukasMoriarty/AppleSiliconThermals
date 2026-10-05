@@ -1,3 +1,4 @@
+use crate::broker;
 use std::fs::{self, File};
 use std::io;
 use std::os::unix::fs::DirBuilderExt;
@@ -7,11 +8,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const UNIT: &str = "applesiliconthermals-curve.service";
 const APP_DIR: &str = "applesiliconthermals";
-
-// Runs from the unit rather than the binary so a removed plugin directory or a crashed daemon still
-// hands every fan back to the SMC. Writing a valid target before 0 forces the driver to rewrite the
-// mode key; reusing the current target (clamped, max if unreadable) avoids spinning the fan up.
-const RELEASE_ALL_FANS: &str = r#"/bin/sh -c 'for d in /sys/class/hwmon/hwmon*; do [ "$$(cat "$$d/name" 2>/dev/null)" = macsmc_hwmon ] || continue; for t in "$$d"/fan*_target; do n="$${t%%_target}"; min=$$(cat "$${n}_min"); max=$$(cat "$${n}_max"); cur=$$(cat "$$t" 2>/dev/null) || cur=$$max; [ "$$cur" -ge "$$min" ] 2>/dev/null || cur=$$min; [ "$$cur" -le "$$max" ] 2>/dev/null || cur=$$max; echo "$$cur" > "$$t"; echo 0 > "$$t"; done; done'"#;
 
 fn not_found(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::NotFound, message.to_string())
@@ -167,6 +163,12 @@ fn systemd_word(path: &Path) -> String {
     out
 }
 
+// Runs from the unit rather than the binary so a removed plugin directory or a crashed daemon still
+// hands every fan back to the SMC through the root broker.
+fn release_command() -> String {
+    format!("/usr/bin/sudo -n {} auto", broker::PATH)
+}
+
 pub fn unit_text(binary: &Path) -> String {
     format!(
         "[Unit]\n\
@@ -183,7 +185,7 @@ pub fn unit_text(binary: &Path) -> String {
          [Install]\n\
          WantedBy=graphical-session.target\n",
         systemd_word(binary),
-        RELEASE_ALL_FANS
+        release_command()
     )
 }
 
@@ -195,7 +197,9 @@ mod tests {
     fn unit_quotes_the_binary_and_releases_without_it() {
         let unit = unit_text(Path::new("/home/u/my plugins/100%/$bin"));
         assert!(unit.contains("ExecStart=\"/home/u/my plugins/100%%/$$bin\" curve run\n"));
-        assert!(unit.contains("ExecStopPost=/bin/sh -c 'for d in /sys/class/hwmon/hwmon*;"));
+        assert!(unit.contains(
+            "ExecStopPost=/usr/bin/sudo -n /usr/local/libexec/apple-silicon-fan-control auto\n"
+        ));
         assert!(unit.contains("\nWantedBy=graphical-session.target\n"));
     }
 }
