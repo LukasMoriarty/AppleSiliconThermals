@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.lukasmoriarty.applesiliconthermals",
   "name": "Apple Silicon Thermals",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": "LukasM",
   "license": "MIT",
   "description": "Thermal monitoring and fan control for Apple Silicon (M1/M2) on Omarchy Linux",
