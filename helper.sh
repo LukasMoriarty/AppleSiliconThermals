@@ -91,7 +91,7 @@ cmd_get() {
     target=$(read_int "$HWMON_DIR/fan${idx}_target" 0)
     label="Fan $idx"
     if [[ -f "$HWMON_DIR/fan${idx}_label" ]]; then
-      label=$(tr -d '\0"\\' < "$HWMON_DIR/fan${idx}_label" 2>/dev/null || echo "Fan $idx")
+      label=$(tr -d "\\0\"\\\\" < "$HWMON_DIR/fan${idx}_label" 2>/dev/null || echo "Fan $idx")
     fi
 
     fan_count=$((fan_count + 1))
