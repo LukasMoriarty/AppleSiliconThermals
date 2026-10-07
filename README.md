@@ -1,6 +1,6 @@
-# 󰈐 AppleSiliconThermals
+# AppleSiliconThermals
 
-**Hardware thermal monitoring and fan speed control plugin for [Omarchy Linux](https://omarchy.org/) on Apple Silicon (M1 / M2) MacBooks.**
+**Hardware thermal monitoring and fan speed control plugin for [Omarchy Linux](https://omarchy.org/) on Apple Silicon MacBooks.**
 
 This plugin is inspired by the macOS menu bar utility **Stats** (https://mac-stats.com/).
 
@@ -10,8 +10,8 @@ This plugin is inspired by the macOS menu bar utility **Stats** (https://mac-sta
 
 ## Features
 
-- 󰈐 **Dynamic Status Bar Indicator**:
-  - Compact fan icon (`󰈐`) seamlessly styled with active Omarchy theme tokens.
+- **Dynamic Status Bar Indicator**:
+  - Compact fan icon seamlessly styled with active Omarchy theme tokens.
   - Dynamically spins smoothly when the fan is active; duration scales proportionally with current RPM.
   - Thermal color alerts: neutral when cool, warm amber (≥65°C), and urgent red (≥80°C).
   - Hover tooltip with live RPM and maximum temperature.
@@ -30,7 +30,7 @@ This plugin is inspired by the macOS menu bar utility **Stats** (https://mac-sta
   - Component temperatures: **NAND Flash**, **Battery Hotspot**, **Charge Voltage Regulator**, and **Wi-Fi / Bluetooth Module**.
   - Real-time Total System Power dissipation in Watts (`W`).
 
-- ⚡ **Zero External Dependencies**:
+- **Zero External Dependencies**:
   - Communicates directly with the Linux kernel's standard `hwmon` sysfs interface (`macsmc_hwmon`).
   - No background Python or Node daemons required; lightweight shell backend.
 
