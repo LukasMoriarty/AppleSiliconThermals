@@ -21,7 +21,15 @@ BarWidget {
   property bool isAppleSilicon: true
   property bool hasFan: true
   property int fanCount: 1
+  // One entry per fan: { index, label, rpm, min, max, target }
+  property var fans: []
   property var sensors: ({})
+
+  // Presets scale with the highest fan max detected (Stats-style % of max).
+  // Max uses the exact hardware value; the broker clamps each fan to its own range.
+  readonly property int quietRpm: root.snapSpeed(Math.round(root.fanMax * 0.25))
+  readonly property int regularRpm: root.snapSpeed(Math.round(root.fanMax * 0.5))
+  readonly property int maxRpm: root.fanMax
 
   property bool popupOpen: false
   readonly property string helperPath: Qt.resolvedUrl("helper.sh").toString().replace(/^file:\/\//, "")
@@ -32,6 +40,10 @@ BarWidget {
     var clamped = Math.max(min, Math.min(max, val))
     var stepIndex = Math.round((clamped - min) / 50)
     return Math.min(max, min + stepIndex * 50)
+  }
+
+  function formatRpm(val) {
+    return String(Math.round(Number(val) || 0)).replace(/\B(?=(\d{3})+(?!\d))/g, ",")
   }
 
   function applyData(jsonStr) {
@@ -48,6 +60,7 @@ BarWidget {
           root.fanMin = data.fan_min || 1199
           root.fanMax = data.fan_max || 7199
           root.fanTarget = (data.fan_target !== undefined) ? data.fan_target : 0
+          root.fans = Array.isArray(data.fans) ? data.fans : []
           root.fanControlEnabled = Boolean(data.fan_control_enabled)
           root.manualMode = Boolean(data.manual_mode)
           root.maxTemp = (data.max_temp !== undefined) ? data.max_temp : 0
@@ -292,7 +305,7 @@ BarWidget {
           }
 
           Text {
-            text: root.deviceModel + (root.hasFan ? (root.fanCount > 1 ? (" • " + root.fanCount + " Fans Synchronized") : "") : " • Fanless")
+            text: root.deviceModel + (root.hasFan ? (root.fanCount > 1 ? (" • " + root.fanCount + " Fans") : "") : " • Fanless")
             color: Qt.rgba(1, 1, 1, 0.6)
             font.family: root.bar ? root.bar.fontFamily : Style.font.family
             font.pixelSize: Style.font.caption
@@ -365,21 +378,53 @@ BarWidget {
         visible: root.hasFan
         spacing: Style.space(8)
 
-        // Multi-fan indicator if more than 1 fan is present (Mac Studio / Mac Pro)
+        // Per-fan status, only shown when more than one fan is present (e.g. 14"/16" MacBook Pro, Mac Studio).
+        // Each fan has its own hardware range; the shared target is clamped per fan by the broker.
         BorderSurface {
           width: parent.width
-          visible: root.fanCount > 1
+          visible: root.fans.length > 1
           radius: Style.spacing.labelGap
           color: Qt.rgba(0, 0.6, 1, 0.12)
           borderSpec: Border.flat(Color.accent, 1)
-          height: Style.space(26)
+          height: fanList.implicitHeight + Style.space(12)
 
-          Text {
-            anchors.centerIn: parent
-            text: "󰈐 Synchronous Multi-Fan Control (" + root.fanCount + " Fans)"
-            color: Color.accent
-            font.family: root.bar ? root.bar.fontFamily : Style.font.family
-            font.pixelSize: Style.font.caption
+          Column {
+            id: fanList
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            anchors.margins: Style.space(8)
+            spacing: Style.space(4)
+
+            Repeater {
+              model: root.fans
+
+              Item {
+                required property var modelData
+                width: fanList.width
+                height: fanName.implicitHeight
+
+                Text {
+                  id: fanName
+                  anchors.left: parent.left
+                  text: "󰈐 " + ((modelData.label && modelData.label !== "Fan") ? modelData.label : ("Fan " + modelData.index))
+                  color: Color.accent
+                  font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                  font.pixelSize: Style.font.caption
+                  font.bold: true
+                }
+
+                Text {
+                  anchors.right: parent.right
+                  text: root.formatRpm(modelData.rpm) + " RPM"
+                    + (modelData.target > 0 ? (" → " + root.formatRpm(modelData.target)) : "")
+                    + "  (" + root.formatRpm(modelData.min) + "–" + root.formatRpm(modelData.max) + ")"
+                  color: root.bar ? root.bar.foreground : Color.foreground
+                  font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                  font.pixelSize: Style.font.caption
+                }
+              }
+            }
           }
         }
 
@@ -438,7 +483,7 @@ BarWidget {
               if (root.manualMode) {
                 root.setSpeed("auto")
               } else {
-                root.setSpeed(root.fanRpm >= root.fanMin ? root.snapSpeed(root.fanRpm) : 1799)
+                root.setSpeed(root.fanRpm >= root.fanMin ? root.snapSpeed(root.fanRpm) : root.quietRpm)
               }
             }
           }
@@ -483,9 +528,9 @@ BarWidget {
             maximum: root.fanMax
             step: 50
             integer: true
-            value: root.fanTarget >= root.fanMin ? root.fanTarget : 1799
+            value: root.fanTarget >= root.fanMin ? root.fanTarget : root.quietRpm
             onReleased: function(val) {
-              root.setSpeed(root.snapSpeed(val))
+              root.setSpeed(val >= root.fanMax ? root.maxRpm : root.snapSpeed(val))
             }
           }
         }
@@ -506,26 +551,26 @@ BarWidget {
 
           Button {
             text: "Quiet"
-            tooltipText: "Quiet cooling: 25% (1,799 RPM)"
+            tooltipText: "Quiet cooling: 25% (" + root.formatRpm(root.quietRpm) + " RPM)"
             width: (parent.width - Style.space(18)) / 4
-            selected: root.manualMode && Math.abs(root.fanTarget - 1799) < 250
-            onClicked: root.setSpeed(1799)
+            selected: root.manualMode && Math.abs(root.fanTarget - root.quietRpm) < 250
+            onClicked: root.setSpeed(root.quietRpm)
           }
 
           Button {
             text: "Regular"
-            tooltipText: "Balanced cooling: 50% (3,599 RPM)"
+            tooltipText: "Balanced cooling: 50% (" + root.formatRpm(root.regularRpm) + " RPM)"
             width: (parent.width - Style.space(18)) / 4
-            selected: root.manualMode && Math.abs(root.fanTarget - 3599) < 250
-            onClicked: root.setSpeed(3599)
+            selected: root.manualMode && Math.abs(root.fanTarget - root.regularRpm) < 250
+            onClicked: root.setSpeed(root.regularRpm)
           }
 
           Button {
             text: "Max"
-            tooltipText: "Maximum cooling: 100% (7,199 RPM)"
+            tooltipText: "Maximum cooling: 100% (" + root.formatRpm(root.maxRpm) + " RPM)"
             width: (parent.width - Style.space(18)) / 4
-            selected: root.manualMode && root.fanTarget >= 7000
-            onClicked: root.setSpeed(7199)
+            selected: root.manualMode && root.fanTarget >= root.maxRpm - 50
+            onClicked: root.setSpeed(root.maxRpm)
           }
         }
 

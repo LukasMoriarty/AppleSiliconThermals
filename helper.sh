@@ -24,6 +24,17 @@ find_macsmc_hwmon() {
   return 1
 }
 
+# read a non-negative integer from a sysfs file, falling back to a default
+read_int() {
+  local value
+  value=$(cat "$1" 2>/dev/null || true)
+  if [[ "$value" =~ ^[0-9]+$ ]]; then
+    echo "$value"
+  else
+    echo "$2"
+  fi
+}
+
 # determine if the system is running on Apple Silicon hardware
 is_apple_silicon() {
   if [[ -f /proc/device-tree/compatible ]] && grep -q "apple," /proc/device-tree/compatible 2>/dev/null; then
@@ -56,33 +67,49 @@ cmd_get() {
 
   local fan_count=0
   local has_fan=false
-  for f in "$HWMON_DIR"/fan*_input; do
-    if [[ -f "$f" ]]; then
-      fan_count=$((fan_count + 1))
-    fi
-  done
-  if (( fan_count > 0 )); then
-    has_fan=true
-  fi
 
+  # Aggregates across all fans: highest RPM/target, widest min..max range.
+  # Each fan can have its own hardware limits (e.g. 14" M1 Pro: 5798 and 6241 RPM).
   local fan_rpm=0
-  local fan_min=1199
-  local fan_max=7199
+  local fan_min=0
+  local fan_max=0
   local fan_target=0
   local fan_control_enabled=false
   local manual_mode=false
+  local fans_json=""
 
-  if [[ -f "$HWMON_DIR/fan1_input" ]]; then
-    fan_rpm=$(cat "$HWMON_DIR/fan1_input" 2>/dev/null || echo 0)
-  fi
-  if [[ -f "$HWMON_DIR/fan1_min" ]]; then
-    fan_min=$(cat "$HWMON_DIR/fan1_min" 2>/dev/null || echo 1199)
-  fi
-  if [[ -f "$HWMON_DIR/fan1_max" ]]; then
-    fan_max=$(cat "$HWMON_DIR/fan1_max" 2>/dev/null || echo 7199)
-  fi
-  if [[ -f "$HWMON_DIR/fan1_target" ]]; then
-    fan_target=$(cat "$HWMON_DIR/fan1_target" 2>/dev/null || echo 0)
+  local input idx label rpm min max target
+  for input in "$HWMON_DIR"/fan*_input; do
+    [[ -f "$input" ]] || continue
+    idx="${input##*/fan}"
+    idx="${idx%_input}"
+    [[ "$idx" =~ ^[0-9]+$ ]] || continue
+
+    rpm=$(read_int "$input" 0)
+    min=$(read_int "$HWMON_DIR/fan${idx}_min" 1199)
+    max=$(read_int "$HWMON_DIR/fan${idx}_max" 7199)
+    target=$(read_int "$HWMON_DIR/fan${idx}_target" 0)
+    label="Fan $idx"
+    if [[ -f "$HWMON_DIR/fan${idx}_label" ]]; then
+      label=$(tr -d '\0"\\' < "$HWMON_DIR/fan${idx}_label" 2>/dev/null || echo "Fan $idx")
+    fi
+
+    fan_count=$((fan_count + 1))
+    (( rpm > fan_rpm )) && fan_rpm=$rpm
+    (( target > fan_target )) && fan_target=$target
+    (( fan_min == 0 || min < fan_min )) && fan_min=$min
+    (( max > fan_max )) && fan_max=$max
+
+    [[ -n "$fans_json" ]] && fans_json+=","
+    fans_json+=$(printf '{"index":%d,"label":"%s","rpm":%d,"min":%d,"max":%d,"target":%d}' \
+      "$idx" "$label" "$rpm" "$min" "$max" "$target")
+  done
+
+  if (( fan_count > 0 )); then
+    has_fan=true
+  else
+    fan_min=1199
+    fan_max=7199
   fi
 
   local fc_param="/sys/module/macsmc_hwmon/parameters/fan_control"
@@ -140,16 +167,18 @@ cmd_get() {
     power_val=$(awk "BEGIN { printf \"%.2f\", $raw_p / 1000000 }")
   fi
 
-  printf '{"is_apple_silicon":true,"has_fan":%s,"fan_count":%d,"fan_rpm":%d,"fan_min":%d,"fan_max":%d,"fan_target":%d,"fan_control_enabled":%s,"manual_mode":%s,"max_temp":%s,"power_watts":%s,"device_model":"%s","sensors":{"nand":%s,"battery":%s,"regulator":%s,"wifi":%s}}\n' \
-    "$has_fan" "$fan_count" "$fan_rpm" "$fan_min" "$fan_max" "$fan_target" "$fan_control_enabled" "$manual_mode" "$max_temp" "$power_val" "$device_model" \
+  printf '{"is_apple_silicon":true,"has_fan":%s,"fan_count":%d,"fan_rpm":%d,"fan_min":%d,"fan_max":%d,"fan_target":%d,"fans":[%s],"fan_control_enabled":%s,"manual_mode":%s,"max_temp":%s,"power_watts":%s,"device_model":"%s","sensors":{"nand":%s,"battery":%s,"regulator":%s,"wifi":%s}}\n' \
+    "$has_fan" "$fan_count" "$fan_rpm" "$fan_min" "$fan_max" "$fan_target" "$fans_json" "$fan_control_enabled" "$manual_mode" "$max_temp" "$power_val" "$device_model" \
     "$temp_nand" "$temp_battery" "$temp_regulator" "$temp_wifi"
 }
 
 cmd_set() {
   local target="${1:-auto}"
 
+  # Coarse format check only (mirrors the sudoers rule); the broker clamps the
+  # value to each fan's own hardware min/max.
   if [[ ! "$target" =~ ^(auto|[1-7][0-9]{3})$ ]]; then
-    echo "Error: Invalid target '$target'. Specify RPM (1199-7199) or 'auto'." >&2
+    echo "Error: Invalid target '$target'. Specify a 4-digit RPM or 'auto'." >&2
     return 1
   fi
 

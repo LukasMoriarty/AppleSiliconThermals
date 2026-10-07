@@ -13,26 +13,23 @@ fi
 
 # Strictly enforce exactly one argument
 if [[ $# -ne 1 ]]; then
-  echo "Usage: apple-silicon-fan-control <auto | 1199..7199>" >&2
+  echo "Usage: apple-silicon-fan-control <auto | RPM (clamped to each fan's min..max)>" >&2
   exit 64
 fi
 
 ACTION="$1"
 
-# Validate argument: must be 'auto' or 4-digit number (1199-7199)
+# Validate argument: must be 'auto' or a 4-digit RPM (same pattern as the sudoers rule)
 if [[ ! "$ACTION" =~ ^(auto|[1-7][0-9]{3})$ ]]; then
-  echo "Error: Invalid argument '$ACTION'. Must be 'auto' or RPM between 1199 and 7199." >&2
+  echo "Error: Invalid argument '$ACTION'. Must be 'auto' or a 4-digit RPM." >&2
   exit 2
 fi
 
-# If numeric, strictly check range
+# Numeric targets are clamped later to each fan's own hardware min/max, since
+# fans in the same Mac can have different limits (e.g. 14" M1 Pro: 5798 and 6241 RPM).
 TARGET=0
 if [[ "$ACTION" != "auto" ]]; then
   TARGET=$((10#$ACTION))
-  if (( TARGET < 1199 || TARGET > 7199 )); then
-    echo "Error: RPM target $TARGET out of bounds (1199..7199)." >&2
-    exit 2
-  fi
 fi
 
 # Discover macsmc_hwmon
@@ -75,7 +72,10 @@ if [[ ${#TARGETS[@]} -eq 0 ]]; then
   exit 1
 fi
 
-# Write target RPM (0 for auto, or integer RPM)
+# Pass 1: validate every fan and compute its value before touching any register,
+# so a bad fan never leaves the others half-configured.
+REGS=()
+VALUES=()
 for reg in "${TARGETS[@]}"; do
   REAL_REG=$(realpath "$reg" 2>/dev/null || true)
   if [[ -z "$REAL_REG" || ! "$REAL_REG" =~ ^/sys/ ]]; then
@@ -88,15 +88,45 @@ for reg in "${TARGETS[@]}"; do
     echo "Security error: Register $REAL_REG is not owned by root (UID $REG_UID)" >&2
     exit 1
   fi
+
+  VALUE=0
+  if (( TARGET > 0 )); then
+    # Clamp to this fan's own hardware limits
+    STEM="${REAL_REG%_target}"
+    MIN=$(cat "${STEM}_min" 2>/dev/null || true)
+    MAX=$(cat "${STEM}_max" 2>/dev/null || true)
+    if [[ ! "$MIN" =~ ^[0-9]+$ || ! "$MAX" =~ ^[0-9]+$ ]] || (( MIN == 0 || MIN > MAX )); then
+      echo "Error: ${STEM}_min/_max are missing or invalid ('$MIN'/'$MAX')." >&2
+      exit 1
+    fi
+    VALUE=$TARGET
+    (( VALUE >= MIN )) || VALUE=$MIN
+    (( VALUE <= MAX )) || VALUE=$MAX
+  fi
+
+  REGS+=("$REAL_REG")
+  VALUES+=("$VALUE")
+done
+
+# Pass 2: write target RPM (0 for auto, or the clamped RPM)
+SUMMARY=()
+for i in "${!REGS[@]}"; do
+  REAL_REG="${REGS[$i]}"
   # Strip world-writable bit if present (remedy legacy chmod 0666)
   chmod o-w "$REAL_REG" 2>/dev/null || true
+  # fan*_target can be exposed read-only (0444), observed with the built-in
+  # macsmc_hwmon driver when fan_control is enabled at runtime via tmpfiles.
+  # kernfs refuses writes to attributes without a write bit, even for root, so
+  # grant owner-only write (root:root, never group/world-writable).
+  chmod u+w,g-w "$REAL_REG" 2>/dev/null || true
 
-  echo "$TARGET" > "$REAL_REG"
+  echo "${VALUES[$i]}" > "$REAL_REG"
+  SUMMARY+=("${REAL_REG##*/}=${VALUES[$i]}")
 done
 
 if (( TARGET == 0 )); then
   echo "Fan control set to auto (SMC management)"
 else
-  echo "Fan speed set to $TARGET RPM across ${#TARGETS[@]} fan(s)"
+  echo "Fan speed set across ${#REGS[@]} fan(s): ${SUMMARY[*]}"
 fi
 exit 0
