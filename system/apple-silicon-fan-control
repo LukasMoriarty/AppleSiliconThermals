@@ -75,6 +75,7 @@ fi
 # Pass 1: validate every fan and compute its value before touching any register,
 # so a bad fan never leaves the others half-configured.
 REGS=()
+PRES=()
 VALUES=()
 for reg in "${TARGETS[@]}"; do
   REAL_REG=$(realpath "$reg" 2>/dev/null || true)
@@ -89,22 +90,28 @@ for reg in "${TARGETS[@]}"; do
     exit 1
   fi
 
-  VALUE=0
-  if (( TARGET > 0 )); then
-    # Clamp to this fan's own hardware limits
-    STEM="${REAL_REG%_target}"
-    MIN=$(cat "${STEM}_min" 2>/dev/null || true)
-    MAX=$(cat "${STEM}_max" 2>/dev/null || true)
-    if [[ ! "$MIN" =~ ^[0-9]+$ || ! "$MAX" =~ ^[0-9]+$ ]] || (( MIN == 0 || MIN > MAX )); then
-      echo "Error: ${STEM}_min/_max are missing or invalid ('$MIN'/'$MAX')." >&2
-      exit 1
-    fi
-    VALUE=$TARGET
-    (( VALUE >= MIN )) || VALUE=$MIN
-    (( VALUE <= MAX )) || VALUE=$MAX
+  STEM="${REAL_REG%_target}"
+  MIN=$(cat "${STEM}_min" 2>/dev/null || true)
+  MAX=$(cat "${STEM}_max" 2>/dev/null || true)
+  if [[ ! "$MIN" =~ ^[0-9]+$ || ! "$MAX" =~ ^[0-9]+$ ]] || (( MIN == 0 || MIN > MAX )); then
+    echo "Error: ${STEM}_min/_max are missing or invalid ('$MIN'/'$MAX')." >&2
+    exit 1
   fi
 
+  # Clamp to this fan's own hardware limits. For auto, PRE is a valid target to
+  # write first: the driver only rewrites the SMC mode key when its cached
+  # manual flag says manual, and that flag is stale after resume, so a bare 0
+  # would be ignored. Reusing the current target avoids a spin-up on the way out.
+  VALUE=0
+  PRE=$(cat "$REAL_REG" 2>/dev/null || true)
+  (( TARGET == 0 )) || PRE=$TARGET
+  [[ "$PRE" =~ ^[0-9]+$ ]] || PRE=$MAX
+  (( PRE >= MIN )) || PRE=$MIN
+  (( PRE <= MAX )) || PRE=$MAX
+  (( TARGET == 0 )) || VALUE=$PRE
+
   REGS+=("$REAL_REG")
+  PRES+=("$PRE")
   VALUES+=("$VALUE")
 done
 
@@ -120,6 +127,7 @@ for i in "${!REGS[@]}"; do
   # grant owner-only write (root:root, never group/world-writable).
   chmod u+w,g-w "$REAL_REG" 2>/dev/null || true
 
+  (( TARGET > 0 )) || echo "${PRES[$i]}" > "$REAL_REG"
   echo "${VALUES[$i]}" > "$REAL_REG"
   SUMMARY+=("${REAL_REG##*/}=${VALUES[$i]}")
 done
