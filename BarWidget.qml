@@ -1,3 +1,5 @@
+pragma ComponentBehavior: Bound
+
 import QtQuick
 import QtQuick.Layouts
 import Quickshell
@@ -143,9 +145,64 @@ BarWidget {
     id: button
     anchors.fill: parent
     bar: root.bar
-    text: !root.isAppleSilicon ? "󰌺" : (root.hasFan ? "󰈐" : "󰔏")
     slotSize: Style.bar.statusSlot
     fontSize: Style.font.caption
+
+    // The fan has to spin around its own hub, not around the middle of the
+    // 16px optical canvas. textRotation turns the whole OpticalGlyph item,
+    // and OpticalGlyph centres the painted ink horizontally only, so at the
+    // caption size this icon is drawn ~0.3px above that pivot — the eye reads
+    // it as the icon sliding around inside the bar cell. Draw the glyph here
+    // and rotate it about the centre of its painted ink instead; the resting
+    // position is the same, only the pivot moves.
+    iconComponent: Component {
+      Item {
+        id: spinner
+        readonly property string glyph: !root.isAppleSilicon ? "󰌺" : (root.hasFan ? "󰈐" : "󰔏")
+        readonly property int glyphSize: Math.max(1, Math.round(button.fontSize))
+        readonly property rect ink: glyphMetrics.tightBoundingRect
+
+        TextMetrics {
+          id: glyphMetrics
+          font.family: button.fontFamily
+          font.pixelSize: spinner.glyphSize
+          text: spinner.glyph
+        }
+
+        Text {
+          id: glyphText
+          // Same horizontal optical correction OpticalGlyph applies, so the
+          // icon still lines up with its neighbours in the bar.
+          anchors.centerIn: parent
+          anchors.horizontalCenterOffset: glyphText.implicitWidth / 2 - (spinner.ink.x + spinner.ink.width / 2)
+          text: spinner.glyph
+          color: button.foreground
+          font.family: button.fontFamily
+          font.pixelSize: spinner.glyphSize
+          // CurveRendering rasterises every angle from the same outline.
+          // NativeRendering re-hints the glyph per frame, and on an 8px icon
+          // that hinting shows up as sideways jitter while it turns.
+          renderType: Text.CurveRendering
+
+          transform: Rotation {
+            id: spin
+            // Text-local coordinates; tightBoundingRect is baseline-relative.
+            origin.x: spinner.ink.x + spinner.ink.width / 2
+            origin.y: glyphText.baselineOffset + spinner.ink.y + spinner.ink.height / 2
+          }
+        }
+
+        NumberAnimation {
+          target: spin
+          property: "angle"
+          from: 0
+          to: 360
+          duration: Math.max(400, Math.round(60000 / Math.max(root.fanRpm, 600)))
+          loops: Animation.Infinite
+          running: root.isAppleSilicon && root.hasFan && root.fanRpm > 0
+        }
+      }
+    }
 
     // Change foreground color depending on heat or manual mode
     foreground: {
@@ -164,15 +221,6 @@ BarWidget {
 
     onPressed: function(b) {
       root.togglePopup()
-    }
-
-    // Dynamic glyph rotation when fan is active
-    NumberAnimation on textRotation {
-      from: 0
-      to: 360
-      duration: Math.max(400, Math.round(60000 / Math.max(root.fanRpm, 600)))
-      loops: Animation.Infinite
-      running: root.isAppleSilicon && root.hasFan && root.fanRpm > 0
     }
   }
 
